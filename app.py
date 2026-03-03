@@ -4,6 +4,9 @@ import re
 import smtplib
 import sqlite3
 import time
+import json
+import urllib.error
+import urllib.request
 from email.message import EmailMessage
 from flask import Flask, redirect, render_template_string, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -36,7 +39,9 @@ BACKLOG_PENALTY_CAP = 20.0
 LECTURER_REG_PATTERN = re.compile(r"^AAP23CS(00[2-9]|0[1-2][0-9]|03[0-6])$")
 STUDENT_ACCOUNT_REG_PATTERN = re.compile(r"^AAP23CS(00[2-9]|0[1-2][0-9]|03[0-6])$")
 DB_PATH = "auth_users.db"
-OTP_PROVIDER = os.getenv("OTP_PROVIDER", "gmail").strip().lower()
+OTP_PROVIDER = os.getenv("OTP_PROVIDER", "resend").strip().lower()
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev").strip()
 GMAIL_OTP_SENDER = os.getenv("GMAIL_OTP_SENDER", "").strip()
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").strip()
 SEMESTER_PAPER_COUNTS = {1: 5, 2: 5, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 6}
@@ -1469,10 +1474,57 @@ def _is_valid_student_registration_number(reg_no):
     return bool(STUDENT_ACCOUNT_REG_PATTERN.fullmatch(reg_no.strip().upper()))
 
 
+def _send_via_resend(email, subject, body):
+    if not RESEND_API_KEY:
+        return False, "Email service not configured. Missing: RESEND_API_KEY"
+
+    payload = json.dumps(
+        {
+            "from": RESEND_FROM_EMAIL or "onboarding@resend.dev",
+            "to": [email],
+            "subject": subject,
+            "text": body,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if 200 <= resp.status < 300:
+                return True, "Email sent successfully."
+            return False, "Email provider returned an unexpected response."
+    except urllib.error.HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8", errors="ignore")
+        except Exception:
+            error_body = ""
+        print(f"[EMAIL][RESEND][HTTPError] {exc.code} {error_body}")
+        return False, "Failed to send email via Resend. Check API key/sender settings."
+    except Exception as exc:
+        print(f"[EMAIL][RESEND][Error] {exc}")
+        return False, "Email service is currently unavailable. Please try again."
+
+
 def _send_otp(email, otp):
     if OTP_PROVIDER in {"console", "demo"}:
         print(f"[OTP] Sending to {email}: {otp}")
         return True, "OTP generated in demo mode."
+
+    if OTP_PROVIDER in {"resend", "resend_api"}:
+        return _send_via_resend(
+            email,
+            "Your OTP for Student Performance Portal",
+            f"Your OTP is {otp}. It is valid for 5 minutes.",
+        )
 
     missing = []
     if not GMAIL_OTP_SENDER:
@@ -1483,7 +1535,7 @@ def _send_otp(email, otp):
         return False, "OTP service not configured. Missing: " + ", ".join(missing)
 
     if OTP_PROVIDER not in {"gmail", "email"}:
-        return False, "Unsupported OTP_PROVIDER. Use 'gmail' or 'console'."
+        return False, "Unsupported OTP_PROVIDER. Use 'resend', 'gmail', or 'console'."
 
     message = EmailMessage()
     message["Subject"] = "Your OTP for Student Performance Portal"
@@ -1506,6 +1558,12 @@ def _send_email(email, subject, body):
         print(f"[EMAIL] To {email} | Subject: {subject}\n{body}")
         return True, "Email generated in demo mode."
 
+    if OTP_PROVIDER in {"resend", "resend_api"}:
+        sent, message = _send_via_resend(email, subject, body)
+        if sent:
+            return True, "Email sent successfully via Resend."
+        return False, message
+
     missing = []
     if not GMAIL_OTP_SENDER:
         missing.append("GMAIL_OTP_SENDER")
@@ -1515,7 +1573,7 @@ def _send_email(email, subject, body):
         return False, "Email service not configured. Missing: " + ", ".join(missing)
 
     if OTP_PROVIDER not in {"gmail", "email"}:
-        return False, "Unsupported OTP_PROVIDER. Use 'gmail' or 'console'."
+        return False, "Unsupported OTP_PROVIDER. Use 'resend', 'gmail', or 'console'."
 
     message = EmailMessage()
     message["Subject"] = subject
