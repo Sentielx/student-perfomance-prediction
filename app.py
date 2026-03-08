@@ -4,9 +4,6 @@ import re
 import smtplib
 import sqlite3
 import time
-import json
-import urllib.error
-import urllib.request
 from email.message import EmailMessage
 from flask import Flask, redirect, render_template_string, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -15,6 +12,7 @@ try:
     from dotenv import load_dotenv
 except ImportError:
     load_dotenv = None
+
 
 if load_dotenv:
     load_dotenv()
@@ -30,7 +28,7 @@ else:
                 os.environ.setdefault(key.strip(), value.strip())
 
 app = Flask(__name__)
-app.secret_key = "student-performance-secret-key"
+app.secret_key = os.getenv("SECRET_KEY", "student-performance-secret-key")
 
 BASE_SEMESTER_MARKS = 50.0
 PASS_MARK = 75.0
@@ -39,12 +37,15 @@ BACKLOG_PENALTY_CAP = 20.0
 LECTURER_REG_PATTERN = re.compile(r"^AAP23CS(00[2-9]|0[1-2][0-9]|03[0-6])$")
 STUDENT_ACCOUNT_REG_PATTERN = re.compile(r"^AAP23CS(00[2-9]|0[1-2][0-9]|03[0-6])$")
 DB_PATH = "auth_users.db"
-OTP_PROVIDER = os.getenv("OTP_PROVIDER", "resend").strip().lower()
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
-RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev").strip()
+OTP_PROVIDER = os.getenv("OTP_PROVIDER", "gmail").strip().lower()
 GMAIL_OTP_SENDER = os.getenv("GMAIL_OTP_SENDER", "").strip()
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").strip()
 SEMESTER_PAPER_COUNTS = {1: 5, 2: 5, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 6}
+
+if OTP_PROVIDER in {"gamil", "gmial", "mail", "email"}:
+    OTP_PROVIDER = "gmail"
+elif OTP_PROVIDER == "demo":
+    OTP_PROVIDER = "console"
 
 AUTH_TEMPLATE = """
 <!DOCTYPE html>
@@ -1436,10 +1437,21 @@ def _backlog_risk_factor(backlogs, current_semester):
     return min(max(backlogs, 0) / max_backlogs, 1.0)
 
 
+DB_INTEGRITY_ERRORS = (sqlite3.IntegrityError,)
+
+
 def _get_db_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _db_execute(conn, query, params=()):
+    conn.execute(query, params)
+
+
+def _db_fetchone(conn, query, params=()):
+    return conn.execute(query, params).fetchone()
 
 
 def _init_db():
@@ -1474,57 +1486,10 @@ def _is_valid_student_registration_number(reg_no):
     return bool(STUDENT_ACCOUNT_REG_PATTERN.fullmatch(reg_no.strip().upper()))
 
 
-def _send_via_resend(email, subject, body):
-    if not RESEND_API_KEY:
-        return False, "Email service not configured. Missing: RESEND_API_KEY"
-
-    payload = json.dumps(
-        {
-            "from": RESEND_FROM_EMAIL or "onboarding@resend.dev",
-            "to": [email],
-            "subject": subject,
-            "text": body,
-        }
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
-            "Content-Type": "application/json",
-        },
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            if 200 <= resp.status < 300:
-                return True, "Email sent successfully."
-            return False, "Email provider returned an unexpected response."
-    except urllib.error.HTTPError as exc:
-        error_body = ""
-        try:
-            error_body = exc.read().decode("utf-8", errors="ignore")
-        except Exception:
-            error_body = ""
-        print(f"[EMAIL][RESEND][HTTPError] {exc.code} {error_body}")
-        return False, "Failed to send email via Resend. Check API key/sender settings."
-    except Exception as exc:
-        print(f"[EMAIL][RESEND][Error] {exc}")
-        return False, "Email service is currently unavailable. Please try again."
-
-
 def _send_otp(email, otp):
     if OTP_PROVIDER in {"console", "demo"}:
         print(f"[OTP] Sending to {email}: {otp}")
         return True, "OTP generated in demo mode."
-
-    if OTP_PROVIDER in {"resend", "resend_api"}:
-        return _send_via_resend(
-            email,
-            "Your OTP for Student Performance Portal",
-            f"Your OTP is {otp}. It is valid for 5 minutes.",
-        )
 
     missing = []
     if not GMAIL_OTP_SENDER:
@@ -1534,8 +1499,8 @@ def _send_otp(email, otp):
     if missing:
         return False, "OTP service not configured. Missing: " + ", ".join(missing)
 
-    if OTP_PROVIDER not in {"gmail", "email"}:
-        return False, "Unsupported OTP_PROVIDER. Use 'resend', 'gmail', or 'console'."
+    if OTP_PROVIDER != "gmail":
+        return False, "Unsupported OTP_PROVIDER. Use 'gmail' or 'console'."
 
     message = EmailMessage()
     message["Subject"] = "Your OTP for Student Performance Portal"
@@ -1558,12 +1523,6 @@ def _send_email(email, subject, body):
         print(f"[EMAIL] To {email} | Subject: {subject}\n{body}")
         return True, "Email generated in demo mode."
 
-    if OTP_PROVIDER in {"resend", "resend_api"}:
-        sent, message = _send_via_resend(email, subject, body)
-        if sent:
-            return True, "Email sent successfully via Resend."
-        return False, message
-
     missing = []
     if not GMAIL_OTP_SENDER:
         missing.append("GMAIL_OTP_SENDER")
@@ -1572,8 +1531,8 @@ def _send_email(email, subject, body):
     if missing:
         return False, "Email service not configured. Missing: " + ", ".join(missing)
 
-    if OTP_PROVIDER not in {"gmail", "email"}:
-        return False, "Unsupported OTP_PROVIDER. Use 'resend', 'gmail', or 'console'."
+    if OTP_PROVIDER != "gmail":
+        return False, "Unsupported OTP_PROVIDER. Use 'gmail' or 'console'."
 
     message = EmailMessage()
     message["Subject"] = subject
@@ -1761,7 +1720,8 @@ def register():
         student_register_number = None
 
     with _get_db_conn() as conn:
-        duplicate = conn.execute(
+        duplicate = _db_fetchone(
+            conn,
             """
             SELECT 1 FROM users
             WHERE (role = ? AND username = ?)
@@ -1770,7 +1730,7 @@ def register():
             LIMIT 1
             """,
             (role, username, email, student_register_number, student_register_number),
-        ).fetchone()
+        )
     if duplicate:
         return render_template_string(
             AUTH_TEMPLATE,
@@ -1822,14 +1782,15 @@ def forgot_password():
         )
 
     with _get_db_conn() as conn:
-        user = conn.execute(
+        user = _db_fetchone(
+            conn,
             """
             SELECT id FROM users
             WHERE role = ? AND username = ? AND phone = ?
             LIMIT 1
             """,
             (role, username, email),
-        ).fetchone()
+        )
 
     if not user:
         return render_template_string(
@@ -1854,7 +1815,8 @@ def forgot_password():
         )
 
     with _get_db_conn() as conn:
-        conn.execute(
+        _db_execute(
+            conn,
             "UPDATE users SET password_hash = ? WHERE id = ?",
             (generate_password_hash(temp_password), int(user["id"])),
         )
@@ -1906,14 +1868,15 @@ def reset_password():
         )
 
     with _get_db_conn() as conn:
-        user = conn.execute(
+        user = _db_fetchone(
+            conn,
             """
             SELECT id, password_hash FROM users
             WHERE role = ? AND username = ? AND phone = ?
             LIMIT 1
             """,
             (role, username, email),
-        ).fetchone()
+        )
     if not user:
         return render_template_string(
             RESET_PASSWORD_TEMPLATE,
@@ -1928,7 +1891,8 @@ def reset_password():
         )
 
     with _get_db_conn() as conn:
-        conn.execute(
+        _db_execute(
+            conn,
             "UPDATE users SET password_hash = ? WHERE id = ?",
             (generate_password_hash(new_password), int(user["id"])),
         )
@@ -1970,7 +1934,8 @@ def verify_otp():
 
     try:
         with _get_db_conn() as conn:
-            conn.execute(
+            _db_execute(
+                conn,
                 """
                 INSERT INTO users(role, username, password_hash, phone, student_register_number, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -1984,7 +1949,7 @@ def verify_otp():
                     int(time.time()),
                 ),
             )
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERRORS:
         session.pop("pending_registration", None)
         return render_template_string(
             AUTH_TEMPLATE,
@@ -2013,10 +1978,11 @@ def login():
         )
 
     with _get_db_conn() as conn:
-        user = conn.execute(
+        user = _db_fetchone(
+            conn,
             "SELECT id, role, username, password_hash FROM users WHERE role = ? AND username = ? LIMIT 1",
             (role, username),
-        ).fetchone()
+        )
 
     if not user or not check_password_hash(user["password_hash"], password):
         return render_template_string(
@@ -2171,3 +2137,4 @@ def result():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
