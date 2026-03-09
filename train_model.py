@@ -1,5 +1,6 @@
-# Model used: RandomForestClassifier (classification), not Linear Regression.
+﻿# Model used: RandomForestClassifier (classification), not Linear Regression.
 import pandas as pd
+from imblearn.over_sampling import SMOTE
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
@@ -69,7 +70,9 @@ numerical_cols = [col for col in X.columns if col not in categorical_cols]
 # Encode categoricals
 label_encoders = {}
 for col in categorical_cols:
-    X[col] = X[col].fillna(X[col].mode()[0])
+    mode = X[col].mode()
+    fill_value = mode.iloc[0] if not mode.empty else "unknown"
+    X[col] = X[col].fillna(fill_value)
     le = LabelEncoder()
     X[col] = le.fit_transform(X[col])
     label_encoders[col] = le
@@ -84,9 +87,20 @@ for col in numerical_cols:
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
-# Better-first imbalance handling for RandomForest (before trying SMOTE).
-model = RandomForestClassifier(random_state=42, class_weight="balanced")
-model.fit(X_train, y_train)
+
+# Apply SMOTE only on training data to avoid leakage from test to train.
+minority_count = y_train.value_counts().min()
+if minority_count > 1:
+    k_neighbors = min(5, minority_count - 1)
+    smote = SMOTE(random_state=42, k_neighbors=k_neighbors)
+    X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
+else:
+    # If minority class is too small for SMOTE, fall back to original split.
+    X_train_balanced, y_train_balanced = X_train, y_train
+
+# With SMOTE balancing, default class weighting avoids over-correction.
+model = RandomForestClassifier(random_state=42)
+model.fit(X_train_balanced, y_train_balanced)
 
 # Save model bundle
 model_bundle = {
@@ -97,4 +111,4 @@ model_bundle = {
 }
 dump(model_bundle, "student_performance_model.joblib")
 
-print("Model trained and saved as student_performance_model.joblib")
+print("Model trained with SMOTE and saved as student_performance_model.joblib")
