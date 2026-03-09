@@ -56,6 +56,7 @@ AUTH_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Student Performance Portal for pass/fail analysis and academic improvement planning.">
     <meta name="robots" content="index, follow">
+    <meta name="google-site-verification" content="1EMp0PTUQ9xwk9bauxTS9IfBpisOOYXZyphlktJdY9s">
     <title>Login / Register</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
