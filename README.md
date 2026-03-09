@@ -151,3 +151,9 @@ Algorithm	Random Forest Classifier
 
 - 💻 [Portfolio](https://portfolio-parthiv.vercel.app/)
 
+## Model Clarification
+
+- This project uses **RandomForestClassifier** for classification (Pass/Fail).
+- It does **not** use Linear Regression.
+- Current web-app result logic in `app.py` is rule-based scoring for analysis UI.
+
