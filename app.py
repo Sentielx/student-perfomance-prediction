@@ -5,7 +5,7 @@ import smtplib
 import sqlite3
 import time
 from email.message import EmailMessage
-from flask import Flask, redirect, render_template_string, request, session, url_for
+from flask import Flask, Response, redirect, render_template_string, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
 try:
@@ -40,6 +40,7 @@ DB_PATH = "auth_users.db"
 OTP_PROVIDER = os.getenv("OTP_PROVIDER", "gmail").strip().lower()
 GMAIL_OTP_SENDER = os.getenv("GMAIL_OTP_SENDER", "").strip()
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").strip()
+SITE_URL = os.getenv("SITE_URL", "").strip().rstrip("/")
 SEMESTER_PAPER_COUNTS = {1: 5, 2: 5, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 6}
 
 if OTP_PROVIDER in {"gamil", "gmial", "mail", "email"}:
@@ -53,6 +54,8 @@ AUTH_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Student Performance Portal for pass/fail analysis and academic improvement planning.">
+    <meta name="robots" content="index, follow">
     <title>Login / Register</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
@@ -1685,6 +1688,48 @@ def _valid_lecturer_register_number(register_number):
 
 
 _init_db()
+
+def _public_base_url():
+    if SITE_URL:
+        return SITE_URL
+    return request.url_root.rstrip("/")
+
+
+@app.after_request
+def add_seo_headers(response):
+    # Help search engines index public pages.
+    if request.method == "GET":
+        response.headers.setdefault("X-Robots-Tag", "index, follow")
+    return response
+
+
+@app.route("/robots.txt", methods=["GET"])
+def robots_txt():
+    base = _public_base_url()
+    body = "\n".join(
+        [
+            "User-agent: *",
+            "Allow: /",
+            f"Sitemap: {base}/sitemap.xml",
+        ]
+    )
+    return Response(body + "\n", mimetype="text/plain")
+
+
+@app.route("/sitemap.xml", methods=["GET"])
+def sitemap_xml():
+    base = _public_base_url()
+    paths = ["/", "/auth", "/forgot-password", "/reset-password"]
+    xml_lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+    for path in paths:
+        xml_lines.append("  <url>")
+        xml_lines.append(f"    <loc>{base}{path}</loc>")
+        xml_lines.append("  </url>")
+    xml_lines.append("</urlset>")
+    return Response("\n".join(xml_lines), mimetype="application/xml")
 
 
 @app.route("/auth", methods=["GET"])
