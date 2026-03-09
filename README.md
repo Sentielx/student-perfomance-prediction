@@ -157,3 +157,19 @@ Algorithm	Random Forest Classifier
 - It does **not** use Linear Regression.
 - Current web-app result logic in `app.py` is rule-based scoring for analysis UI.
 
+
+## Search Engine Indexing (Render)
+
+1. Set `SITE_URL` in Render Environment to your live URL, then redeploy.
+2. Confirm these URLs open publicly:
+   - `/robots.txt`
+   - `/sitemap.xml`
+3. Submit your sitemap in Google Search Console:
+   - Add property for your domain/Render URL
+   - Submit `https://your-domain-or-render-url/sitemap.xml`
+4. Optionally submit the same sitemap to Bing Webmaster Tools.
+
+Notes:
+- Search indexing is not instant; it may take days/weeks.
+- Anyone with the public URL can access immediately even before indexing.
+
