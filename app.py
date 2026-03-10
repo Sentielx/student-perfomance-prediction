@@ -4,9 +4,11 @@ import re
 import smtplib
 import sqlite3
 import time
+import base64
 import json
 from email.message import EmailMessage
 from urllib import error as urlerror
+from urllib import parse as urlparse
 from urllib import request as urlrequest
 
 import pandas as pd
@@ -53,8 +55,10 @@ STUDENT_ACCOUNT_REG_PATTERN = re.compile(r"^AAP23CS(00[2-9]|0[1-2][0-9]|03[0-6])
 DB_PATH = "auth_users.db"
 GMAIL_OTP_SENDER = os.getenv("GMAIL_OTP_SENDER", "").strip()
 GMAIL_APP_PASSWORD = "".join(os.getenv("GMAIL_APP_PASSWORD", "").split())
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
-RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", "onboarding@resend.dev").strip()
+GMAIL_API_CLIENT_ID = os.getenv("GMAIL_API_CLIENT_ID", "").strip()
+GMAIL_API_CLIENT_SECRET = os.getenv("GMAIL_API_CLIENT_SECRET", "").strip()
+GMAIL_API_REFRESH_TOKEN = os.getenv("GMAIL_API_REFRESH_TOKEN", "").strip()
+GMAIL_API_SENDER = os.getenv("GMAIL_API_SENDER", "").strip() or GMAIL_OTP_SENDER
 SITE_URL = os.getenv("SITE_URL", "").strip().rstrip("/")
 SEMESTER_PAPER_COUNTS = {1: 5, 2: 5, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 6}
 MODEL_BUNDLE_PATH = os.getenv("MODEL_BUNDLE_PATH", "student_performance_model.joblib")
@@ -66,27 +70,30 @@ SMTP_TIMEOUT_SECONDS = max(3.0, _env_float("SMTP_TIMEOUT_SECONDS", 8))
 
 
 def _normalize_otp_provider(raw_provider):
-    provider = (raw_provider or "gmail").strip().strip("\"'").lower()
+    provider = (raw_provider or "gmail_api").strip().strip("\"'").lower()
     alias_map = {
         "gamil": "gmail",
         "gmial": "gmail",
         "mail": "gmail",
         "email": "gmail",
         "smtp": "gmail",
-        "google": "gmail",
+        "google": "gmail_api",
+        "google_api": "gmail_api",
+        "gmailapi": "gmail_api",
+        "api": "gmail_api",
+        "http": "gmail_api",
+        "resend": "gmail_api",
+        "resend-api": "gmail_api",
         "demo": "console",
-        "api": "resend",
-        "http": "resend",
-        "resend-api": "resend",
     }
     provider = alias_map.get(provider, provider)
-    if provider not in {"gmail", "console", "resend"}:
-        print(f"[OTP][WARN] Unsupported OTP_PROVIDER '{provider}'. Falling back to gmail.")
-        return "gmail"
+    if provider not in {"gmail", "gmail_api", "console"}:
+        print(f"[OTP][WARN] Unsupported OTP_PROVIDER '{provider}'. Falling back to gmail_api.")
+        return "gmail_api"
     return provider
 
 
-OTP_PROVIDER = _normalize_otp_provider(os.getenv("OTP_PROVIDER", "gmail"))
+OTP_PROVIDER = _normalize_otp_provider(os.getenv("OTP_PROVIDER", "gmail_api"))
 
 
 def _load_model_bundle():
@@ -1635,52 +1642,57 @@ def _classify_smtp_error(error_text):
     return "Unknown SMTP error while sending email."
 
 
-def _classify_resend_error(status_code, body_text):
+def _classify_gmail_api_error(status_code, body_text):
     body = (body_text or "").lower()
 
-    if status_code == 403 and "1010" in body:
-        return "Resend rejected request (error 1010). User-Agent header was missing/blocked."
-
-    if status_code in {401, 403}:
-        return "Resend authentication failed. Check RESEND_API_KEY."
-
-    if status_code == 422 or "from" in body or "domain" in body or "verify" in body:
+    if status_code in {400, 401} and (
+        "invalid_grant" in body or "invalid_client" in body or "unauthorized_client" in body
+    ):
         return (
-            "Resend sender/domain not verified. Set RESEND_FROM_EMAIL to a verified sender "
-            "in your Resend account."
+            "Gmail API authentication failed. Check GMAIL_API_CLIENT_ID, "
+            "GMAIL_API_CLIENT_SECRET, and GMAIL_API_REFRESH_TOKEN."
         )
 
-    if status_code == 429 or "rate" in body:
-        return "Resend rate limit reached. Wait and try again."
+    if status_code == 403 and ("insufficient" in body or "scope" in body):
+        return "Gmail API scope/permission issue. Ensure Gmail send scope is granted."
+
+    if status_code == 429:
+        return "Gmail API quota/rate limit reached. Wait and try again."
 
     if status_code >= 500:
-        return "Resend service error. Retry in a minute."
+        return "Gmail API service error. Retry in a minute."
 
     if body_text:
-        return f"Resend API error ({status_code}): {body_text}"
+        return f"Gmail API error ({status_code}): {body_text}"
 
-    return f"Resend API request failed with status {status_code}."
+    return f"Gmail API request failed with status {status_code}."
 
 
-def _send_via_resend(to_email, subject, body, channel="EMAIL"):
-    if not RESEND_API_KEY:
-        return False, "Missing RESEND_API_KEY."
-    if not RESEND_FROM_EMAIL:
-        return False, "Missing RESEND_FROM_EMAIL."
+def _gmail_api_access_token():
+    missing = []
+    if not GMAIL_API_CLIENT_ID:
+        missing.append("GMAIL_API_CLIENT_ID")
+    if not GMAIL_API_CLIENT_SECRET:
+        missing.append("GMAIL_API_CLIENT_SECRET")
+    if not GMAIL_API_REFRESH_TOKEN:
+        missing.append("GMAIL_API_REFRESH_TOKEN")
+    if missing:
+        return None, "Missing: " + ", ".join(missing)
 
-    payload = {
-        "from": RESEND_FROM_EMAIL,
-        "to": [to_email],
-        "subject": subject,
-        "text": body,
-    }
+    payload = urlparse.urlencode(
+        {
+            "client_id": GMAIL_API_CLIENT_ID,
+            "client_secret": GMAIL_API_CLIENT_SECRET,
+            "refresh_token": GMAIL_API_REFRESH_TOKEN,
+            "grant_type": "refresh_token",
+        }
+    ).encode("utf-8")
 
     req = urlrequest.Request(
-        "https://api.resend.com/emails",
-        data=json.dumps(payload).encode("utf-8"),
+        "https://oauth2.googleapis.com/token",
+        data=payload,
         headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
-            "Content-Type": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
             "User-Agent": "student-performance-portal/1.0",
         },
@@ -1689,21 +1701,70 @@ def _send_via_resend(to_email, subject, body, channel="EMAIL"):
 
     try:
         with urlrequest.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+            parsed = json.loads(body or "{}")
+            token = parsed.get("access_token")
+            if not token:
+                return None, "No access_token returned by Google OAuth token endpoint."
+            return token, ""
+    except urlerror.HTTPError as exc:
+        body_text = exc.read().decode("utf-8", errors="ignore")
+        print(f"[GMAIL_API][TOKEN][HTTPError] {exc.code} {body_text}")
+        return None, _classify_gmail_api_error(int(exc.code), body_text)
+    except urlerror.URLError as exc:
+        print(f"[GMAIL_API][TOKEN][URLError] {exc}")
+        return None, "Could not reach Google OAuth endpoint from server network."
+    except Exception as exc:
+        print(f"[GMAIL_API][TOKEN][Error] {exc}")
+        return None, f"Unexpected token error: {exc}"
+
+
+def _send_via_gmail_api(to_email, subject, body, channel="EMAIL"):
+    if not GMAIL_API_SENDER:
+        return False, "Missing GMAIL_API_SENDER."
+
+    access_token, token_error = _gmail_api_access_token()
+    if not access_token:
+        return False, token_error
+
+    msg = EmailMessage()
+    msg["From"] = GMAIL_API_SENDER
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    raw_message = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    payload = {"raw": raw_message}
+
+    req = urlrequest.Request(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "student-performance-portal/1.0",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlrequest.urlopen(req, timeout=20) as resp:
             status = getattr(resp, "status", resp.getcode())
             if 200 <= int(status) < 300:
                 return True, ""
             body_text = resp.read().decode("utf-8", errors="ignore")
-            return False, _classify_resend_error(int(status), body_text)
+            return False, _classify_gmail_api_error(int(status), body_text)
     except urlerror.HTTPError as exc:
         body_text = exc.read().decode("utf-8", errors="ignore")
-        print(f"[{channel}][RESEND][HTTPError] {exc.code} {body_text}")
-        return False, _classify_resend_error(int(exc.code), body_text)
+        print(f"[{channel}][GMAIL_API][HTTPError] {exc.code} {body_text}")
+        return False, _classify_gmail_api_error(int(exc.code), body_text)
     except urlerror.URLError as exc:
-        print(f"[{channel}][RESEND][URLError] {exc}")
-        return False, "Could not reach Resend API from server network."
+        print(f"[{channel}][GMAIL_API][URLError] {exc}")
+        return False, "Could not reach Gmail API from server network."
     except Exception as exc:
-        print(f"[{channel}][RESEND][Error] {exc}")
-        return False, f"Unexpected Resend error: {exc}"
+        print(f"[{channel}][GMAIL_API][Error] {exc}")
+        return False, f"Unexpected Gmail API error: {exc}"
 
 
 def _send_via_gmail(message, channel="EMAIL"):
@@ -1740,23 +1801,21 @@ def _send_otp(email, otp):
         print(f"[OTP] Sending to {email}: {otp}")
         return True, "OTP generated in demo mode."
 
-    message = EmailMessage()
-    message["Subject"] = "Your OTP for Student Performance Portal"
-    message["From"] = GMAIL_OTP_SENDER or RESEND_FROM_EMAIL
-    message["To"] = email
-    message.set_content(f"Your OTP is {otp}. It is valid for 5 minutes.")
+    subject = "Your OTP for Student Performance Portal"
+    body = f"Your OTP is {otp}. It is valid for 5 minutes."
 
-    if OTP_PROVIDER == "resend":
-        sent, reason = _send_via_resend(
+    if OTP_PROVIDER == "gmail_api":
+        sent, reason = _send_via_gmail_api(
             to_email=email,
-            subject=message["Subject"],
-            body=message.get_content(),
+            subject=subject,
+            body=body,
             channel="OTP",
         )
         if sent:
             return True, "OTP sent successfully to your Gmail."
         return False, "Failed to send OTP email. " + reason
 
+    # Legacy SMTP fallback (not suitable for Render free plan).
     missing = []
     if not GMAIL_OTP_SENDER:
         missing.append("GMAIL_OTP_SENDER")
@@ -1765,8 +1824,11 @@ def _send_otp(email, otp):
     if missing:
         return False, "OTP service not configured. Missing: " + ", ".join(missing)
 
-    if OTP_PROVIDER != "gmail":
-        print(f"[OTP][WARN] Unsupported OTP_PROVIDER '{OTP_PROVIDER}', using gmail fallback.")
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = GMAIL_OTP_SENDER
+    message["To"] = email
+    message.set_content(body)
 
     sent, reason = _send_via_gmail(message, channel="OTP")
     if sent:
@@ -1779,8 +1841,8 @@ def _send_email(email, subject, body):
         print(f"[EMAIL] To {email} | Subject: {subject}\n{body}")
         return True, "Email generated in demo mode."
 
-    if OTP_PROVIDER == "resend":
-        sent, reason = _send_via_resend(
+    if OTP_PROVIDER == "gmail_api":
+        sent, reason = _send_via_gmail_api(
             to_email=email,
             subject=subject,
             body=body,
@@ -1790,6 +1852,7 @@ def _send_email(email, subject, body):
             return True, "Email sent successfully."
         return False, "Failed to send email. " + reason
 
+    # Legacy SMTP fallback.
     missing = []
     if not GMAIL_OTP_SENDER:
         missing.append("GMAIL_OTP_SENDER")
@@ -1797,9 +1860,6 @@ def _send_email(email, subject, body):
         missing.append("GMAIL_APP_PASSWORD")
     if missing:
         return False, "Email service not configured. Missing: " + ", ".join(missing)
-
-    if OTP_PROVIDER != "gmail":
-        print(f"[OTP][WARN] Unsupported OTP_PROVIDER '{OTP_PROVIDER}', using gmail fallback.")
 
     message = EmailMessage()
     message["Subject"] = subject
