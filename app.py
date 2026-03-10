@@ -49,6 +49,7 @@ ENSEMBLE_RF_WEIGHT = 0.70
 ENSEMBLE_RULE_WEIGHT = 0.30
 MODEL_BUNDLE = None
 MODEL_LOAD_ERROR = None
+SMTP_TIMEOUT_SECONDS = max(3.0, float(os.getenv("SMTP_TIMEOUT_SECONDS", "8")))
 
 
 def _normalize_otp_provider(raw_provider):
@@ -1585,7 +1586,7 @@ def _is_valid_student_registration_number(reg_no):
 def _send_via_gmail(message, channel="EMAIL"):
     # Try SMTPS first, then STARTTLS fallback.
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
             smtp.login(GMAIL_OTP_SENDER, GMAIL_APP_PASSWORD)
             smtp.send_message(message)
         return True
@@ -1593,7 +1594,7 @@ def _send_via_gmail(message, channel="EMAIL"):
         print(f"[{channel}][GMAIL][465][Error] {exc_ssl}")
 
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as smtp:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
             smtp.ehlo()
             smtp.starttls()
             smtp.ehlo()
