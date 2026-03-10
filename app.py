@@ -1583,14 +1583,53 @@ def _is_valid_student_registration_number(reg_no):
     return bool(STUDENT_ACCOUNT_REG_PATTERN.fullmatch(reg_no.strip().upper()))
 
 
+def _classify_smtp_error(error_text):
+    text = (error_text or "").lower()
+
+    if (
+        "authentication failed" in text
+        or "username and password not accepted" in text
+        or "application-specific password required" in text
+        or "534" in text
+        or "535" in text
+    ):
+        return (
+            "Gmail authentication failed. Verify GMAIL_OTP_SENDER and "
+            "GMAIL_APP_PASSWORD (Google app password)."
+        )
+
+    if "recipients refused" in text or "recipient address rejected" in text:
+        return "Recipient Gmail address was rejected. Check the entered email."
+
+    if (
+        "network is unreachable" in text
+        or "timed out" in text
+        or "temporary failure in name resolution" in text
+        or "name or service not known" in text
+        or "connection refused" in text
+    ):
+        return "Server could not reach Gmail SMTP. Retry in a minute and check Render network restrictions."
+
+    if "quota" in text or "rate limit" in text or "too many" in text:
+        return "Gmail sending quota/rate limit reached. Wait and try again."
+
+    if text.strip():
+        return f"SMTP error: {error_text}"
+
+    return "Unknown SMTP error while sending email."
+
+
 def _send_via_gmail(message, channel="EMAIL"):
     # Try SMTPS first, then STARTTLS fallback.
+    errors = []
+
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
             smtp.login(GMAIL_OTP_SENDER, GMAIL_APP_PASSWORD)
             smtp.send_message(message)
-        return True
+        return True, ""
     except Exception as exc_ssl:
+        errors.append(f"465 {exc_ssl.__class__.__name__}: {exc_ssl}")
         print(f"[{channel}][GMAIL][465][Error] {exc_ssl}")
 
     try:
@@ -1600,11 +1639,13 @@ def _send_via_gmail(message, channel="EMAIL"):
             smtp.ehlo()
             smtp.login(GMAIL_OTP_SENDER, GMAIL_APP_PASSWORD)
             smtp.send_message(message)
-        return True
+        return True, ""
     except Exception as exc_tls:
+        errors.append(f"587 {exc_tls.__class__.__name__}: {exc_tls}")
         print(f"[{channel}][GMAIL][587][Error] {exc_tls}")
 
-    return False
+    combined = " | ".join(errors)
+    return False, _classify_smtp_error(combined)
 
 
 def _send_otp(email, otp):
@@ -1629,9 +1670,10 @@ def _send_otp(email, otp):
     message["To"] = email
     message.set_content(f"Your OTP is {otp}. It is valid for 5 minutes.")
 
-    if _send_via_gmail(message, channel="OTP"):
+    sent, reason = _send_via_gmail(message, channel="OTP")
+    if sent:
         return True, "OTP sent successfully to your Gmail."
-    return False, "Failed to send OTP email. Check Gmail/app-password settings."
+    return False, "Failed to send OTP email. " + reason
 
 
 def _send_email(email, subject, body):
@@ -1656,9 +1698,10 @@ def _send_email(email, subject, body):
     message["To"] = email
     message.set_content(body)
 
-    if _send_via_gmail(message, channel="EMAIL"):
+    sent, reason = _send_via_gmail(message, channel="EMAIL")
+    if sent:
         return True, "Email sent successfully."
-    return False, "Failed to send email. Check Gmail/app-password settings."
+    return False, "Failed to send email. " + reason
 
 
 def _pass_probability(
