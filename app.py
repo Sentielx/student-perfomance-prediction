@@ -1638,6 +1638,9 @@ def _classify_smtp_error(error_text):
 def _classify_resend_error(status_code, body_text):
     body = (body_text or "").lower()
 
+    if status_code == 403 and "1010" in body:
+        return "Resend rejected request (error 1010). User-Agent header was missing/blocked."
+
     if status_code in {401, 403}:
         return "Resend authentication failed. Check RESEND_API_KEY."
 
@@ -1678,6 +1681,8 @@ def _send_via_resend(to_email, subject, body, channel="EMAIL"):
         headers={
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "student-performance-portal/1.0",
         },
         method="POST",
     )
