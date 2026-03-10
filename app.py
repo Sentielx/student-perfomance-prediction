@@ -41,7 +41,7 @@ LECTURER_REG_PATTERN = re.compile(r"^AAP23CS(00[2-9]|0[1-2][0-9]|03[0-6])$")
 STUDENT_ACCOUNT_REG_PATTERN = re.compile(r"^AAP23CS(00[2-9]|0[1-2][0-9]|03[0-6])$")
 DB_PATH = "auth_users.db"
 GMAIL_OTP_SENDER = os.getenv("GMAIL_OTP_SENDER", "").strip()
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").strip()
+GMAIL_APP_PASSWORD = "".join(os.getenv("GMAIL_APP_PASSWORD", "").split())
 SITE_URL = os.getenv("SITE_URL", "").strip().rstrip("/")
 SEMESTER_PAPER_COUNTS = {1: 5, 2: 5, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 6}
 MODEL_BUNDLE_PATH = os.getenv("MODEL_BUNDLE_PATH", "student_performance_model.joblib")
@@ -1582,6 +1582,30 @@ def _is_valid_student_registration_number(reg_no):
     return bool(STUDENT_ACCOUNT_REG_PATTERN.fullmatch(reg_no.strip().upper()))
 
 
+def _send_via_gmail(message, channel="EMAIL"):
+    # Try SMTPS first, then STARTTLS fallback.
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
+            smtp.login(GMAIL_OTP_SENDER, GMAIL_APP_PASSWORD)
+            smtp.send_message(message)
+        return True
+    except Exception as exc_ssl:
+        print(f"[{channel}][GMAIL][465][Error] {exc_ssl}")
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(GMAIL_OTP_SENDER, GMAIL_APP_PASSWORD)
+            smtp.send_message(message)
+        return True
+    except Exception as exc_tls:
+        print(f"[{channel}][GMAIL][587][Error] {exc_tls}")
+
+    return False
+
+
 def _send_otp(email, otp):
     if OTP_PROVIDER in {"console", "demo"}:
         print(f"[OTP] Sending to {email}: {otp}")
@@ -1604,14 +1628,9 @@ def _send_otp(email, otp):
     message["To"] = email
     message.set_content(f"Your OTP is {otp}. It is valid for 5 minutes.")
 
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
-            smtp.login(GMAIL_OTP_SENDER, GMAIL_APP_PASSWORD)
-            smtp.send_message(message)
+    if _send_via_gmail(message, channel="OTP"):
         return True, "OTP sent successfully to your Gmail."
-    except Exception as exc:
-        print(f"[OTP][GMAIL][Error] {exc}")
-        return False, "Failed to send OTP email. Check Gmail/app-password settings."
+    return False, "Failed to send OTP email. Check Gmail/app-password settings."
 
 
 def _send_email(email, subject, body):
@@ -1636,14 +1655,9 @@ def _send_email(email, subject, body):
     message["To"] = email
     message.set_content(body)
 
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=20) as smtp:
-            smtp.login(GMAIL_OTP_SENDER, GMAIL_APP_PASSWORD)
-            smtp.send_message(message)
+    if _send_via_gmail(message, channel="EMAIL"):
         return True, "Email sent successfully."
-    except Exception as exc:
-        print(f"[EMAIL][GMAIL][Error] {exc}")
-        return False, "Failed to send email. Check Gmail/app-password settings."
+    return False, "Failed to send email. Check Gmail/app-password settings."
 
 
 def _pass_probability(
