@@ -1,4 +1,4 @@
-import os
+﻿import os
 import random
 import re
 import smtplib
@@ -37,16 +37,31 @@ BACKLOG_PENALTY_CAP = 20.0
 LECTURER_REG_PATTERN = re.compile(r"^AAP23CS(00[2-9]|0[1-2][0-9]|03[0-6])$")
 STUDENT_ACCOUNT_REG_PATTERN = re.compile(r"^AAP23CS(00[2-9]|0[1-2][0-9]|03[0-6])$")
 DB_PATH = "auth_users.db"
-OTP_PROVIDER = os.getenv("OTP_PROVIDER", "gmail").strip().lower()
 GMAIL_OTP_SENDER = os.getenv("GMAIL_OTP_SENDER", "").strip()
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").strip()
 SITE_URL = os.getenv("SITE_URL", "").strip().rstrip("/")
 SEMESTER_PAPER_COUNTS = {1: 5, 2: 5, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 6}
 
-if OTP_PROVIDER in {"gamil", "gmial", "mail", "email"}:
-    OTP_PROVIDER = "gmail"
-elif OTP_PROVIDER == "demo":
-    OTP_PROVIDER = "console"
+
+def _normalize_otp_provider(raw_provider):
+    provider = (raw_provider or "gmail").strip().strip("\"'").lower()
+    alias_map = {
+        "gamil": "gmail",
+        "gmial": "gmail",
+        "mail": "gmail",
+        "email": "gmail",
+        "smtp": "gmail",
+        "google": "gmail",
+        "demo": "console",
+    }
+    provider = alias_map.get(provider, provider)
+    if provider not in {"gmail", "console"}:
+        print(f"[OTP][WARN] Unsupported OTP_PROVIDER '{provider}'. Falling back to gmail.")
+        return "gmail"
+    return provider
+
+
+OTP_PROVIDER = _normalize_otp_provider(os.getenv("OTP_PROVIDER", "gmail"))
 
 AUTH_TEMPLATE = """
 <!DOCTYPE html>
@@ -1504,7 +1519,7 @@ def _send_otp(email, otp):
         return False, "OTP service not configured. Missing: " + ", ".join(missing)
 
     if OTP_PROVIDER != "gmail":
-        return False, "Unsupported OTP_PROVIDER. Use 'gmail' or 'console'."
+        print(f"[OTP][WARN] Unsupported OTP_PROVIDER '{OTP_PROVIDER}', using gmail fallback.")
 
     message = EmailMessage()
     message["Subject"] = "Your OTP for Student Performance Portal"
@@ -1536,7 +1551,7 @@ def _send_email(email, subject, body):
         return False, "Email service not configured. Missing: " + ", ".join(missing)
 
     if OTP_PROVIDER != "gmail":
-        return False, "Unsupported OTP_PROVIDER. Use 'gmail' or 'console'."
+        print(f"[OTP][WARN] Unsupported OTP_PROVIDER '{OTP_PROVIDER}', using gmail fallback.")
 
     message = EmailMessage()
     message["Subject"] = subject
