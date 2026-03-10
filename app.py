@@ -5,6 +5,9 @@ import smtplib
 import sqlite3
 import time
 from email.message import EmailMessage
+
+import pandas as pd
+from joblib import load
 from flask import Flask, Response, redirect, render_template_string, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -41,6 +44,11 @@ GMAIL_OTP_SENDER = os.getenv("GMAIL_OTP_SENDER", "").strip()
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "").strip()
 SITE_URL = os.getenv("SITE_URL", "").strip().rstrip("/")
 SEMESTER_PAPER_COUNTS = {1: 5, 2: 5, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 6}
+MODEL_BUNDLE_PATH = os.getenv("MODEL_BUNDLE_PATH", "student_performance_model.joblib")
+ENSEMBLE_RF_WEIGHT = 0.70
+ENSEMBLE_RULE_WEIGHT = 0.30
+MODEL_BUNDLE = None
+MODEL_LOAD_ERROR = None
 
 
 def _normalize_otp_provider(raw_provider):
@@ -62,6 +70,75 @@ def _normalize_otp_provider(raw_provider):
 
 
 OTP_PROVIDER = _normalize_otp_provider(os.getenv("OTP_PROVIDER", "gmail"))
+
+
+def _load_model_bundle():
+    global MODEL_BUNDLE, MODEL_LOAD_ERROR
+    if MODEL_BUNDLE is not None or MODEL_LOAD_ERROR is not None:
+        return MODEL_BUNDLE
+    try:
+        MODEL_BUNDLE = load(MODEL_BUNDLE_PATH)
+    except Exception as exc:
+        MODEL_LOAD_ERROR = str(exc)
+        print(f"[MODEL][WARN] Could not load model bundle: {exc}")
+    return MODEL_BUNDLE
+
+
+def _rf_pass_probability(course, current_semester, study_hours, attendance, backlogs):
+    bundle = _load_model_bundle()
+    if not bundle:
+        return None
+
+    row = {
+        "Course": course,
+        "Current Semester": current_semester,
+        "Study Hours per Week": study_hours,
+        "Attendance Rate": attendance,
+        "Number of Backlogs": backlogs,
+        # App currently does not collect this field; use neutral default.
+        "Participation in Extracurricular Activities": "No",
+    }
+    model_input = pd.DataFrame([row])
+    model_columns = bundle.get("columns", [])
+    categorical_cols = bundle.get("categorical_cols", [])
+    label_encoders = bundle.get("label_encoders", {})
+
+    for col in model_columns:
+        if col not in model_input.columns:
+            model_input[col] = "Unknown" if col in categorical_cols else 0.0
+    model_input = model_input[model_columns]
+
+    for col in categorical_cols:
+        encoder = label_encoders.get(col)
+        if encoder is None:
+            continue
+        raw_value = model_input.at[0, col]
+        try:
+            encoded_value = int(encoder.transform([raw_value])[0])
+        except Exception:
+            # Unseen category fallback.
+            encoded_value = 0
+        model_input[col] = encoded_value
+
+    for col in model_columns:
+        if col not in categorical_cols:
+            model_input[col] = pd.to_numeric(model_input[col], errors="coerce").fillna(0.0)
+
+    try:
+        prob = float(bundle["model"].predict_proba(model_input)[0][1])
+    except Exception as exc:
+        print(f"[MODEL][WARN] Prediction failed: {exc}")
+        return None
+
+    prob = max(0.01, min(0.99, prob))
+    return round(prob * 100.0, 1)
+
+
+def _ensemble_pass_probability(rule_pass_pct, rf_pass_pct):
+    if rf_pass_pct is None:
+        return round(rule_pass_pct, 1)
+    blended = (ENSEMBLE_RF_WEIGHT * rf_pass_pct) + (ENSEMBLE_RULE_WEIGHT * rule_pass_pct)
+    return round(max(1.0, min(99.0, blended)), 1)
 
 AUTH_TEMPLATE = """
 <!DOCTYPE html>
@@ -2114,9 +2191,13 @@ def result():
     current_total = round(internal_marks + BASE_SEMESTER_MARKS, 1)
     backlog_penalty = _backlog_penalty(backlogs, current_semester)
     current_effective = round(current_total - backlog_penalty, 1)
-    current_pass_pct = _pass_probability(
+    rule_current_pass_pct = _pass_probability(
         internal_marks, attendance, study_hours, backlogs, current_semester, current_effective
     )
+    rf_current_pass_pct = _rf_pass_probability(
+        course, current_semester, study_hours, attendance, backlogs
+    )
+    current_pass_pct = _ensemble_pass_probability(rule_current_pass_pct, rf_current_pass_pct)
     current_fail_pct = round(100.0 - current_pass_pct, 1)
     current_result = "Pass" if current_effective >= PASS_MARK else "Fail"
 
@@ -2127,7 +2208,7 @@ def result():
     projected_total = round(projected_internal + BASE_SEMESTER_MARKS, 1)
     projected_penalty = _backlog_penalty(projected_backlogs, current_semester)
     projected_effective = round(projected_total - projected_penalty, 1)
-    projected_pass_pct = _pass_probability(
+    rule_projected_pass_pct = _pass_probability(
         projected_internal,
         projected_attendance,
         projected_study,
@@ -2135,6 +2216,14 @@ def result():
         current_semester,
         projected_effective,
     )
+    rf_projected_pass_pct = _rf_pass_probability(
+        course,
+        current_semester,
+        projected_study,
+        projected_attendance,
+        projected_backlogs,
+    )
+    projected_pass_pct = _ensemble_pass_probability(rule_projected_pass_pct, rf_projected_pass_pct)
 
     chart_data = {
         "internal_marks": round(internal_marks, 1),
@@ -2147,6 +2236,11 @@ def result():
         "current_pass_pct": current_pass_pct,
         "current_fail_pct": current_fail_pct,
         "projected_pass_pct": projected_pass_pct,
+        "prediction_mode": "Ensemble (RandomForest + Rule)",
+        "rf_current_pass_pct": rf_current_pass_pct,
+        "rf_projected_pass_pct": rf_projected_pass_pct,
+        "rule_current_pass_pct": rule_current_pass_pct,
+        "rule_projected_pass_pct": rule_projected_pass_pct,
     }
     actions_list = _actions(
         role, study_hours, attendance, internal_marks, backlogs, current_semester
