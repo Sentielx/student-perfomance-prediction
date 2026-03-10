@@ -2,6 +2,13 @@
 import pandas as pd
 from imblearn.over_sampling import SMOTE
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from joblib import dump
@@ -102,6 +109,14 @@ else:
 model = RandomForestClassifier(random_state=42)
 model.fit(X_train_balanced, y_train_balanced)
 
+# Evaluate on untouched test set
+y_pred = model.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred, zero_division=0)
+recall = recall_score(y_test, y_pred, zero_division=0)
+f1 = f1_score(y_test, y_pred, zero_division=0)
+cm = confusion_matrix(y_test, y_pred)
+
 # Save model bundle
 model_bundle = {
     "model": model,
@@ -112,3 +127,9 @@ model_bundle = {
 dump(model_bundle, "student_performance_model.joblib")
 
 print("Model trained with SMOTE and saved as student_performance_model.joblib")
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1 Score: {f1:.4f}")
+print("Confusion Matrix:")
+print(cm)
