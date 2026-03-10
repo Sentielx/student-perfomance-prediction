@@ -36,6 +36,14 @@ else:
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "student-performance-secret-key")
 
+
+def _env_float(name, default):
+    raw = os.getenv(name, str(default))
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return float(default)
+
 BASE_SEMESTER_MARKS = 50.0
 PASS_MARK = 75.0
 BACKLOG_PENALTY_PER = 4.0
@@ -54,7 +62,7 @@ ENSEMBLE_RF_WEIGHT = 0.70
 ENSEMBLE_RULE_WEIGHT = 0.30
 MODEL_BUNDLE = None
 MODEL_LOAD_ERROR = None
-SMTP_TIMEOUT_SECONDS = max(3.0, float(os.getenv("SMTP_TIMEOUT_SECONDS", "8")))
+SMTP_TIMEOUT_SECONDS = max(3.0, _env_float("SMTP_TIMEOUT_SECONDS", 8))
 
 
 def _normalize_otp_provider(raw_provider):
